@@ -66,30 +66,148 @@ describe('indexWorkspace', () => {
     }
   })
 
-  it('indexes file and external directory links while applying ignore rules', async () => {
+  it('skips links that escape the workspace', async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-link-root-'))
     const external = await mkdtemp(join(tmpdir(), 'dsh-at-file-link-target-'))
     try {
       await writeFile(join(external, 'guide.md'), 'guide\n')
       await writeFile(join(external, 'secret.log'), 'secret\n')
+      // In-workspace files keep the ignore-rule machinery exercised here.
+      await mkdir(join(root, 'ignored-docs'), { recursive: true })
+      await writeFile(join(root, 'ignored-docs', 'note.md'), 'note\n')
+      await writeFile(join(root, 'keep.md'), 'keep\n')
+      await writeFile(join(root, 'secret.log'), 'secret\n')
+      // Every one of these resolves outside the workspace root.
       await symlink(external, join(root, 'docs'), 'dir')
-      await symlink(external, join(root, 'ignored-docs'), 'dir')
       await symlink(join(external, 'guide.md'), join(root, 'guide-link.md'), 'file')
-      await symlink(join(external, 'secret.log'), join(root, 'secret.log'), 'file')
+      await symlink(join(external, 'secret.log'), join(root, 'external-secret.log'), 'file')
 
       const { files } = await indexWorkspace(root, {
         maxFiles: 100,
         ignoreDirs: ['ignored-docs'],
         ignoreFiles: ['secret.log'],
       })
-      expect(files.map(file => `${file.kind}:${file.relative}`)).toEqual([
-        'dir:docs',
-        'file:docs/guide.md',
-        'file:guide-link.md',
-      ])
+      const relatives = files.map(file => file.relative)
+      // The escaping directory link and all its descendants are absent.
+      expect(relatives).not.toContain('docs')
+      expect(relatives.some(path => path.startsWith('docs/'))).toBe(false)
+      // The escaping file links are absent.
+      expect(relatives).not.toContain('guide-link.md')
+      expect(relatives).not.toContain('external-secret.log')
+      // In-workspace files survive; the ignore rules still hide their names.
+      expect(relatives).toContain('keep.md')
+      expect(relatives).not.toContain('secret.log')
+      expect(relatives.some(path => path.startsWith('ignored-docs/'))).toBe(false)
     } finally {
       await rm(root, { recursive: true, force: true })
       await rm(external, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a file link that escapes the workspace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-escape-file-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-at-file-escape-out-'))
+    try {
+      await writeFile(join(outside, 'secret.txt'), 'secret\n')
+      await symlink(join(outside, 'secret.txt'), join(root, 'leak.txt'), 'file')
+      const { files } = await indexWorkspace(root, { maxFiles: 100, ignoreDirs: [], ignoreFiles: [] })
+      expect(files).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a directory link that escapes the workspace and never descends into it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-escape-dir-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-at-file-escape-out-'))
+    try {
+      await mkdir(join(outside, 'nested'), { recursive: true })
+      await writeFile(join(outside, 'top.txt'), 'top\n')
+      await writeFile(join(outside, 'nested', 'deep.txt'), 'deep\n')
+      await symlink(outside, join(root, 'escape'), 'dir')
+      const { files } = await indexWorkspace(root, { maxFiles: 100, ignoreDirs: [], ignoreFiles: [] })
+      expect(files).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a link to the workspace parent (the rel === ".." arm)', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dsh-at-file-parent-'))
+    const root = join(parent, 'ws')
+    await mkdir(root, { recursive: true })
+    try {
+      await symlink(parent, join(root, 'up'), 'dir')
+      const { files } = await indexWorkspace(root, { maxFiles: 100, ignoreDirs: [], ignoreFiles: [] })
+      expect(files).toEqual([])
+    } finally {
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('skips a link that escapes into a sibling directory (the ".." prefix arm)', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'dsh-at-file-siblings-'))
+    const root = join(parent, 'ws')
+    const sibling = join(parent, 'sibling')
+    await mkdir(root, { recursive: true })
+    await mkdir(sibling, { recursive: true })
+    try {
+      await writeFile(join(sibling, 'neighbor.txt'), 'neighbor\n')
+      await symlink(join(sibling, 'neighbor.txt'), join(root, 'neighbor.txt'), 'file')
+      const { files } = await indexWorkspace(root, { maxFiles: 100, ignoreDirs: [], ignoreFiles: [] })
+      expect(files).toEqual([])
+    } finally {
+      await rm(parent, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps an internal symlink chain visible', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-chain-'))
+    try {
+      await mkdir(join(root, 'c'), { recursive: true })
+      await writeFile(join(root, 'c', 'leaf.txt'), 'leaf\n')
+      await symlink(join(root, 'c'), join(root, 'b'), 'dir')
+      await symlink(join(root, 'b'), join(root, 'a'), 'dir')
+      const { files } = await indexWorkspace(root, { maxFiles: 100, ignoreDirs: [], ignoreFiles: [] })
+      const relatives = files.map(file => file.relative)
+      expect(relatives).toContain('c')
+      expect(relatives).toContain('c/leaf.txt')
+      expect(relatives).toContain('b')
+      expect(relatives).toContain('b/leaf.txt')
+      expect(relatives).toContain('a')
+      expect(relatives).toContain('a/leaf.txt')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('applies ignore rules to contained symlinks without containment surprises', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-contained-ignore-'))
+    try {
+      await mkdir(join(root, 'real'), { recursive: true })
+      await writeFile(join(root, 'real', 'keep.txt'), 'keep\n')
+      await writeFile(join(root, 'real', 'skip.log'), 'skip\n')
+      // A contained symlink to a real directory, one whose basename is
+      // ignored, and one contained file link that must still index.
+      await symlink(join(root, 'real'), join(root, 'mirror'), 'dir')
+      await symlink(join(root, 'real', 'keep.txt'), join(root, 'skip.log'), 'file')
+      await symlink(join(root, 'real', 'keep.txt'), join(root, 'alias.txt'), 'file')
+      const { files } = await indexWorkspace(root, {
+        maxFiles: 100,
+        ignoreDirs: ['mirror'],
+        ignoreFiles: ['skip.log'],
+      })
+      const relatives = files.map(file => file.relative)
+      expect(relatives).not.toContain('mirror')
+      expect(relatives.some(path => path.startsWith('mirror/'))).toBe(false)
+      expect(relatives).not.toContain('skip.log')
+      expect(relatives).toContain('alias.txt')
+      expect(relatives).toContain('real/keep.txt')
+      expect(relatives).not.toContain('real/skip.log')
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 

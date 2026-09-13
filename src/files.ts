@@ -1,13 +1,14 @@
 /**
  * Workspace path indexing over node:fs. The walk streams directories one
  * dirent at a time (memory stays O(one level) even under a giant directory),
- * follows file and directory symlinks without re-entering an ancestor target,
+ * follows file and directory symlinks that stay confined to the workspace
+ * root (escaping links are skipped) without re-entering an ancestor target,
  * skips configured ignore dirs by basename, and hard-stops at the configured
  * entry cap with an honest `truncated` flag.
  */
 import { opendir, realpath, stat } from 'node:fs/promises'
 import type { Dir, Dirent } from 'node:fs'
-import { join, relative, sep } from 'node:path'
+import { isAbsolute, join, relative, sep } from 'node:path'
 import type { FileEntry, FileIgnoreRuleInput } from './contract.ts'
 import { compileIgnoreRules } from './defaults.ts'
 
@@ -179,6 +180,14 @@ export async function indexWorkspace(
             signal?.throwIfAborted()
             // Broken, inaccessible, and transient links do not invalidate the
             // rest of the workspace index.
+            continue
+          }
+          // A link whose target resolves outside the workspace is skipped
+          // entirely: not indexed, not descended. Indexing it would expose
+          // external names under an in-workspace alias and let a pick escape
+          // the boundary the Host mention check is supposed to enforce.
+          const targetRel = relative(rootCanonical, targetPath)
+          if (targetRel === '..' || targetRel.startsWith(`..${sep}`) || isAbsolute(targetRel)) {
             continue
           }
           if (target.isDirectory()) {

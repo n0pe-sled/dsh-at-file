@@ -7,7 +7,7 @@
  * text cannot forge the gesture.
  */
 import { isAbsolute, relative as pathRelative, resolve, sep } from 'node:path'
-import { stat } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
@@ -58,12 +58,14 @@ export function scanMentions(text: string, ignorePastedMentions = true): readonl
  * Resolve one token to an absolute path and its kind, confined to the cwd.
  * @param token - workspace-relative token.
  * @param cwd - the session's workspace directory.
+ * @param rootCanonical - the canonical workspace root, for symlink containment.
  * @param signal - caller lifetime.
  * @returns the resolved mention, or undefined when it is not inside the workspace.
  */
 async function resolveMention(
   token: string,
   cwd: string,
+  rootCanonical: string,
   signal: AbortSignal,
 ): Promise<Mention | undefined> {
   if (isAbsolute(token)) return undefined
@@ -73,9 +75,23 @@ async function resolveMention(
     return undefined
   }
   signal.throwIfAborted()
-  const info = await stat(absolute).catch(() => undefined)
+  // Resolve the real target before trusting it: a symlink under an in-workspace
+  // alias may point outside, and the lexical check above cannot see that.
+  const canonical = await realpath(absolute).catch(() => undefined)
+  signal.throwIfAborted()
+  if (canonical === undefined) return undefined
+  const confinedReal = pathRelative(rootCanonical, canonical)
+  if (confinedReal === '..' || confinedReal.startsWith(`..${sep}`) || isAbsolute(confinedReal)) {
+    return undefined
+  }
+  // A target that survives realpath but fails stat is a TOCTOU-only window
+  // (it vanished between the two calls). The guard keeps such a vanished
+  // target from being injected; it is not reachable in a deterministic test.
+  /* v8 ignore start -- stat failing after realpath succeeds is a TOCTOU-only window */
+  const info = await stat(canonical).catch(() => undefined)
   signal.throwIfAborted()
   if (info === undefined) return undefined
+  /* v8 ignore stop */
   const relative = confined.split(sep).join('/') || '.'
   return { relative, kind: info.isDirectory() ? 'dir' : 'file' }
 }
@@ -110,6 +126,10 @@ export async function expandMentions(
   ignorePastedMentions = true,
 ): Promise<UserMessage[]> {
   if (cwd === undefined || !isAbsolute(cwd)) return []
+  // Canonicalize the workspace root once per call (one syscall, not one per
+  // token). Without it we cannot tell an internal link from an escaping one.
+  const rootCanonical = await realpath(cwd).catch(() => undefined)
+  if (rootCanonical === undefined) return []
   const tokens: string[] = []
   for (const message of messages) {
     if (message.source.kind !== USER_SOURCE_KIND) continue
@@ -122,7 +142,7 @@ export async function expandMentions(
   const injections: UserMessage[] = []
   for (const token of tokens) {
     signal.throwIfAborted()
-    const mention = await resolveMention(token, cwd, signal)
+    const mention = await resolveMention(token, cwd, rootCanonical, signal)
     if (mention === undefined) continue
     injections.push(createUserMessage({
       content: [{ type: 'text', text: referenceForm(mention) }],

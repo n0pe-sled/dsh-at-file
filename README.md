@@ -93,7 +93,7 @@ Omitting `ignoreDirs` keeps the built-in list. When you provide it, include ever
 
 ## Path Handling
 
-- The picker indexes regular files, directories, and symbolic links in the active workspace. Directory links are traversed through their workspace-relative alias, while links back to an ancestor are kept visible without being re-entered.
+- The picker indexes regular files, directories, and symbolic links in the active workspace. A link is followed only when its real target resolves inside the workspace; links that point outside are skipped entirely (neither indexed nor descended), and links back to an ancestor stay visible without being re-entered.
 - Global and workspace file-name filters are combined during the Host index walk, before entries count toward `maxIndexedFiles` or reach the browser.
 - The Host accepts workspace-relative paths. Absolute paths and paths that escape the workspace are ignored.
 - Reference markers are created from typed text and picker selections. Pasted `@` tokens are ignored when the default setting is enabled.

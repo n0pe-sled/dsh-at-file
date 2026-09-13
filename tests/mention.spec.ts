@@ -2,7 +2,7 @@
  * Host @path reference behavior: token recognition, workspace confinement,
  * existence/kind markers, and the unknown-path/non-user-source skips.
  */
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
+import { mkdtemp, mkdir, symlink, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -137,6 +137,68 @@ describe('expandMentions', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('refuses a token that resolves through an escaping symlink', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-out-'))
+    try {
+      await writeFile(join(outside, 'secret.txt'), 'secret\n')
+      await symlink(outside, join(root, 'notes'), 'dir')
+      expect(await expandMentions([user('read @notes/secret.txt')], root, new AbortController().signal)).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves a token through an internal symlink with the correct kind', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-'))
+    try {
+      await mkdir(join(root, 'real'), { recursive: true })
+      await writeFile(join(root, 'real', 'file.txt'), 'x\n')
+      await symlink(join(root, 'real'), join(root, 'link'), 'dir')
+      const injections = await expandMentions([user('read @link/file.txt')], root, new AbortController().signal)
+      expect(injections).toHaveLength(1)
+      expect(injections[0]!.content[0]).toEqual({
+        type: 'text',
+        text: '<workspace-reference path="link/file.txt" kind="file" />',
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('resolves the bare root token through the rel === "" containment case', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-'))
+    try {
+      const injections = await expandMentions([user('inspect @.')], root, new AbortController().signal)
+      expect(injections).toHaveLength(1)
+      expect(injections[0]!.content[0]).toEqual({
+        type: 'text',
+        text: '<workspace-reference path="." kind="directory" />',
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('injects nothing for a planted external-alias key like notes/id_ed25519', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-'))
+    const outside = await mkdtemp(join(tmpdir(), 'dsh-at-file-mention-ssh-'))
+    try {
+      await writeFile(join(outside, 'id_ed25519'), 'private key material\n')
+      await symlink(outside, join(root, 'notes'), 'dir')
+      expect(await expandMentions([user('look at @notes/id_ed25519')], root, new AbortController().signal)).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+      await rm(outside, { recursive: true, force: true })
+    }
+  })
+
+  it('injects nothing when the workspace root cannot be canonicalized', async () => {
+    const missing = join(tmpdir(), 'dsh-at-file-mention-missing-root')
+    expect(await expandMentions([user('read @a.ts')], missing, new AbortController().signal)).toEqual([])
   })
 
   it('treats a relative cwd as unavailable', async () => {
