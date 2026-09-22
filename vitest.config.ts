@@ -50,6 +50,9 @@ export default defineConfig({
       '@deepseek-ai/dsh-client-runtime/client': dsh('packages/client/runtime/src/client/index.ts'),
       '@deepseek-ai/dsh-client-ui-input-trigger/client': dsh('packages/client/ui-input-trigger/src/client/index.ts'),
       '@deepseek-ai/dsh-client-connection/client': dsh('packages/client/connection/src/client/index.ts'),
+      // This harness line predates the split client-store package; tests use
+      // the client-runtime-backed shim (same fallback the bundle build applies).
+      '@deepseek-ai/dsh-client-store': fileURLToPath(new URL('./tests/client-store-shim.ts', import.meta.url)),
     },
   },
   test: {
